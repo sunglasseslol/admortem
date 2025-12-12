@@ -1,0 +1,16 @@
+{
+  "name": "admortem-bulkassign",
+  "version": "1.0.0",
+  "description": "Bulk Assign roles from a pastebin. Used by the Ad Mortem discord server for Kickstarter pledge rewards.",
+  "license": "ISC",
+  "author": "sunglasses.",
+  "type": "commonjs",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "dependencies": {
+    "discord.js": "^14.25.1",
+    "node-fetch": "^3.3.2"
+  }
+}
