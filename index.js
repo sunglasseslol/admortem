@@ -35,8 +35,8 @@ async function registerCommand() {
           .setDescription("Pastebin ID containing user IDs, one per line")
           .setRequired(true),
       )
-      .addStringOption((option) =>
-        option.setName("role_id").setDescription("Role ID").setRequired(true),
+      .addRoleOption((option) =>
+        option.setName("role").setDescription("Role").setRequired(true),
       )
       .toJSON(),
     new SlashCommandBuilder()
@@ -48,8 +48,8 @@ async function registerCommand() {
           .setDescription("Pastebin ID containing user IDs, one per line")
           .setRequired(true),
       )
-      .addStringOption((option) =>
-        option.setName("role_id").setDescription("Role ID").setRequired(true),
+      .addRoleOption((option) =>
+        option.setName("role").setDescription("Role").setRequired(true),
       )
       .toJSON(),
   ];
@@ -72,68 +72,7 @@ client.once("clientReady", async () => {
   await registerCommand();
 });
 
-async function bulkAssignTest(pastebinId, roleId, interaction) {
-  try {
-    const pastebinRawUrl = `https://pastebin.com/raw/${pastebinId}`;
-    const response = await fetch(pastebinRawUrl);
-    if (!response.ok)
-      throw new Error(
-        `Failed to fetch pastebin data (status ${response.status})`,
-      );
-    const raw = await response.text();
-
-    const userIds = raw
-      .split(/\r?\n/)
-      .map((x) => x.trim())
-      .filter((x) => /^\d{17,19}$/.test(x));
-
-    if (userIds.length === 0) {
-      await interaction.editReply("No valid user IDs found in the pastebin.");
-      return;
-    }
-
-    await interaction.editReply(
-      `Starting to assign role to ${userIds.length} users...`,
-    );
-
-    const guild = interaction.guild;
-
-    const chunkSize = 10;
-    const delayMs = 2000;
-    let successCount = 0;
-    let failCount = 0;
-
-    for (let i = 0; i < userIds.length; i += chunkSize) {
-      const chunk = userIds.slice(i, i + chunkSize);
-
-      for (const id of chunk) {
-        try {
-          const member = await guild.members.fetch(id);
-          // await member.roles.add(roleId);
-          console.log(`Added ${roleId} to ${member.displayName}`);
-          successCount++;
-        } catch (err) {
-          console.error(`Failed for user ID ${id}:`, err.message);
-          failCount++;
-        }
-      }
-
-      if (i + chunkSize < userIds.length) {
-        await delay(delayMs);
-      }
-    }
-
-    await interaction.followUp({
-      content: `Finished! Successfully assigned roleID ${roleId} to ${successCount} users. Failed for ${failCount} users.`,
-      ephemeral: true,
-    });
-  } catch (error) {
-    console.error("Error during bulk assign:", error);
-    await interaction.editReply(`Error: ${error.message}`);
-  }
-}
-
-async function bulkAssign(pastebinId, roleId, interaction) {
+async function bulkAssignTest(pastebinId, role, interaction) {
   try {
     const pastebinRawUrl = `https://pastebin.com/raw/${pastebinId}`;
     const response = await fetch(pastebinRawUrl);
@@ -170,7 +109,7 @@ async function bulkAssign(pastebinId, roleId, interaction) {
       for (const id of chunk) {
         try {
           const member = await guild.members.fetch(id);
-          await member.roles.add(roleId);
+          // await member.roles.add(role.id);
           successCount++;
         } catch (err) {
           console.error(`Failed for user ID ${id}:`, err.message);
@@ -184,7 +123,67 @@ async function bulkAssign(pastebinId, roleId, interaction) {
     }
 
     await interaction.followUp({
-      content: `successfully assigned roleID ${roleId} to ${successCount} users. failed for ${failCount} users.`,
+      content: `successfully assigned "${role.name}" role to ${successCount} users. failed for ${failCount} users.`,
+      ephemeral: true,
+    });
+  } catch (error) {
+    console.error("error during bulk assign:", error);
+    await interaction.editReply(`Error: ${error.message}`);
+  }
+}
+
+async function bulkAssign(pastebinId, role, interaction) {
+  try {
+    const pastebinRawUrl = `https://pastebin.com/raw/${pastebinId}`;
+    const response = await fetch(pastebinRawUrl);
+    if (!response.ok)
+      throw new Error(
+        `failed to fetch pastebin data (status ${response.status})`,
+      );
+    const raw = await response.text();
+
+    const userIds = raw
+      .split(/\r?\n/)
+      .map((x) => x.trim())
+      .filter((x) => /^\d{17,19}$/.test(x));
+
+    if (userIds.length === 0) {
+      await interaction.editReply("no valid user IDs found in the pastebin.");
+      return;
+    }
+
+    await interaction.editReply(
+      `starting to assign role to ${userIds.length} users`,
+    );
+
+    const guild = interaction.guild;
+
+    const chunkSize = 10;
+    const delayMs = 2000;
+    let successCount = 0;
+    let failCount = 0;
+
+    for (let i = 0; i < userIds.length; i += chunkSize) {
+      const chunk = userIds.slice(i, i + chunkSize);
+
+      for (const id of chunk) {
+        try {
+          const member = await guild.members.fetch(id);
+          await member.roles.add(role.id);
+          successCount++;
+        } catch (err) {
+          console.error(`Failed for user ID ${id}:`, err.message);
+          failCount++;
+        }
+      }
+
+      if (i + chunkSize < userIds.length) {
+        await new Promise((res) => setTimeout(res, delayMs));
+      }
+    }
+
+    await interaction.followUp({
+      content: `successfully assigned "${role.name}" role to ${successCount} users. failed for ${failCount} users.`,
       ephemeral: true,
     });
   } catch (error) {
@@ -218,15 +217,15 @@ client.on("interactionCreate", async (interaction) => {
   }
 
   const pastebinId = interaction.options.getString("pastebin_id");
-  const roleId = interaction.options.getString("role_id");
+  const role = interaction.options.getRole("role");
 
   await interaction.deferReply({ ephemeral: true });
 
   if (interaction.commandName == "bulkassign") {
-    bulkAssign(pastebinId, roleId, interaction);
+    bulkAssign(pastebinId, role, interaction);
   }
   if (interaction.commandName == "bulkassigntest") {
-    bulkAssignTest(pastebinId, roleId, interaction);
+    bulkAssignTest(pastebinId, role, interaction);
   }
 });
 
