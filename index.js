@@ -6,6 +6,7 @@ const {
   Routes,
   SlashCommandBuilder,
 } = require("discord.js");
+const fs = require("fs/promises");
 
 const TOKEN = process.argv[2];
 const CLIENT_ID = "1448983823781072951";
@@ -93,11 +94,12 @@ async function fetchUserIdsFromPastebin(pastebinId) {
 /**
  * Assigns a role to a given chunk of user IDs.
  * If dryRun is true, only fetches the members without actually adding the role.
- * Returns { successCount, failCount }
+ * Returns { successCount, failCount, successfulUserIds }
  */
 async function processUserChunk(guild, userIds, role, dryRun = false) {
   let successCount = 0;
   let failCount = 0;
+  const successfulUserIds = [];
 
   for (const id of userIds) {
     try {
@@ -106,12 +108,13 @@ async function processUserChunk(guild, userIds, role, dryRun = false) {
         await member.roles.add(role.id);
       }
       successCount++;
+      successfulUserIds.push(id);
     } catch (err) {
       console.error(`Failed for user ID ${id}:`, err.message);
       failCount++;
     }
   }
-  return { successCount, failCount };
+  return { successCount, failCount, successfulUserIds };
 }
 
 /**
@@ -145,18 +148,30 @@ async function bulkAssignUsersFromPastebin(pastebinId, role, interaction, dryRun
     const delayMs = 2000;
     let successCount = 0;
     let failCount = 0;
+    const allSuccessfulUserIds = [];
 
     for (let i = 0; i < userIds.length; i += chunkSize) {
       const chunk = userIds.slice(i, i + chunkSize);
 
-      const { successCount: chunkSuccess, failCount: chunkFail } =
+      const { successCount: chunkSuccess, failCount: chunkFail, successfulUserIds } =
         await processUserChunk(guild, chunk, role, dryRun);
 
       successCount += chunkSuccess;
       failCount += chunkFail;
+      allSuccessfulUserIds.push(...successfulUserIds);
 
       if (i + chunkSize < userIds.length) {
         await new Promise((res) => setTimeout(res, delayMs));
+      }
+    }
+
+    // Write successful user IDs to file (only for actual role assignments, not dry runs)
+    if (!dryRun && allSuccessfulUserIds.length > 0) {
+      try {
+        await fs.writeFile("lastrun.txt", allSuccessfulUserIds.join("\n"), "utf-8");
+        console.log(`Logged ${allSuccessfulUserIds.length} successful user IDs to lastrun.txt`);
+      } catch (fileError) {
+        console.error("Failed to write to lastrun.txt:", fileError);
       }
     }
 
