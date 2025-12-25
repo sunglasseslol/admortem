@@ -7,6 +7,7 @@ const {
   SlashCommandBuilder,
 } = require("discord.js");
 const fs = require("fs/promises");
+const path = require("path");
 
 const TOKEN = process.argv[2];
 const CLIENT_ID = "1448983823781072951";
@@ -23,6 +24,8 @@ const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers],
   partials: [Partials.GuildMember],
 });
+
+const rest = new REST({ version: "10" }).setToken(TOKEN);
 
 async function registerCommand() {
   const commands = [
@@ -53,8 +56,6 @@ async function registerCommand() {
       )
       .toJSON(),
   ];
-
-  const rest = new REST({ version: "10" }).setToken(TOKEN);
 
   try {
     console.log("Registering slash command...");
@@ -92,39 +93,58 @@ async function fetchUserIdsFromPastebin(pastebinId) {
 }
 
 /**
- * Assigns a role to a given chunk of user IDs.
- * If dryRun is true, only fetches the members without actually adding the role.
- * Returns { successCount, failCount, successfulUserIds }
+ * Assigns a role to a single user with verification.
+ * Uses REST API directly for optimal rate limit handling.
+ * Discord.js REST manager automatically respects X-RateLimit-* headers.
+ * Returns { success: boolean, userId, error?: string }
  */
-async function processUserChunk(guild, userIds, role, dryRun = false) {
-  let successCount = 0;
-  let failCount = 0;
-  const successfulUserIds = [];
-
-  for (const id of userIds) {
-    try {
-      const member = await guild.members.fetch(id);
-      if (!dryRun) {
-        await member.roles.add(role.id);
-      }
-      successCount++;
-      successfulUserIds.push(id);
-    } catch (err) {
-      console.error(`Failed for user ID ${id}:`, err.message);
-      failCount++;
+async function assignRoleToUser(guildId, userId, roleId, dryRun = false) {
+  try {
+    if (!dryRun) {
+      await rest.put(
+        Routes.guildMemberRole(guildId, userId, roleId),
+        { reason: "Bulk role assignment" }
+      );
     }
+
+    const guild = client.guilds.cache.get(guildId);
+    if (!guild) {
+      return { success: false, userId, error: "Guild not found" };
+    }
+    
+    const member = await guild.members.fetch({ user: userId, force: true });
+    if (!member) {
+      return { success: false, userId, error: "Member not found after assignment" };
+    }
+
+    // Check if role is actually added
+    const hasRole = member.roles.cache.has(roleId);
+    if (!dryRun && !hasRole) {
+      return { success: false, userId, error: "Role not found after assignment - verification failed" };
+    }
+
+    return { success: true, userId };
+  } catch (err) {
+    if (err.status === 429) {
+      console.warn(`Rate limited for user ${userId}, will retry automatically`);
+      throw err;
+    }
+    return { success: false, userId, error: err.message };
   }
-  return { successCount, failCount, successfulUserIds };
 }
 
 /**
- * Main bulk assign runner.
+ * Main bulk assign runner with rate limiting. Also checks if the user has the role after adding it
+ * X-RateLimit-* headers are used for rate limiting.
  * @param {string} pastebinId
  * @param {object} role
  * @param {object} interaction
  * @param {boolean} dryRun (default: false) - If true, doesn't actually assign the roles; just tests fetches.
  */
 async function bulkAssignUsersFromPastebin(pastebinId, role, interaction, dryRun = false) {
+  const logFilePath = path.join(process.cwd(), "lastrun.txt");
+  let logFileHandle = null;
+
   try {
     const userIds = await fetchUserIdsFromPastebin(pastebinId);
 
@@ -139,46 +159,98 @@ async function bulkAssignUsersFromPastebin(pastebinId, role, interaction, dryRun
       );
     } else {
       await interaction.editReply(
-        `starting to assign role to ${userIds.length} users`,
+        `starting to assign role to ${userIds.length} users (optimized rate limiting enabled)`,
       );
+      // Open log file for appending successful assignments
+      try {
+        await fs.writeFile(logFilePath, "", "utf-8"); // Clear previous run
+        logFileHandle = true; // Flag to indicate file is ready
+      } catch (fileError) {
+        console.error("Failed to open log file:", fileError);
+      }
     }
 
-    const guild = interaction.guild;
-    const chunkSize = 10;
-    const delayMs = 2000;
+    const guildId = interaction.guild.id;
     let successCount = 0;
     let failCount = 0;
-    const allSuccessfulUserIds = [];
+    const failedUserIds = [];
 
-    for (let i = 0; i < userIds.length; i += chunkSize) {
-      const chunk = userIds.slice(i, i + chunkSize);
+    for (let i = 0; i < userIds.length; i++) {
+      const userId = userIds[i];
+      
+      try {
+        const result = await assignRoleToUser(guildId, userId, role.id, dryRun);
+        
+        if (result.success) {
+          successCount++;
+          
+          // Log successful assignment immediately to file
+          if (!dryRun && logFileHandle) {
+            try {
+              await fs.appendFile(logFilePath, `${userId}\n`, "utf-8");
+              console.log(`✓ ${userId} - Role "${role.name}" verified and logged`);
+            } catch (logError) {
+              console.error(`Failed to log ${userId}:`, logError);
+            }
+          } else if (dryRun) {
+            console.log(`✓ ${userId} - Would be assigned (dry run)`);
+          }
+        } else {
+          failCount++;
+          failedUserIds.push({ userId, error: result.error });
+          console.error(`✗ ${userId} - ${result.error}`);
+        }
+      } catch (err) {
+        if (err.status === 429) {
+          console.warn(`Rate limit hit for ${userId}, REST manager will handle retry`);
+          try {
+            await new Promise(resolve => setTimeout(resolve, 1000));
+            const retryResult = await assignRoleToUser(guildId, userId, role.id, dryRun);
+            if (retryResult.success) {
+              successCount++;
+              if (!dryRun && logFileHandle) {
+                await fs.appendFile(logFilePath, `${userId}\n`, "utf-8");
+                console.log(`✓ ${userId} - Role assigned after retry`);
+              }
+            } else {
+              failCount++;
+              failedUserIds.push({ userId, error: retryResult.error || "Rate limit retry failed" });
+            }
+          } catch (retryErr) {
+            failCount++;
+            failedUserIds.push({ userId, error: `Rate limit retry failed: ${retryErr.message}` });
+            console.error(`✗ ${userId} - Retry failed:`, retryErr.message);
+          }
+        } else {
+          failCount++;
+          failedUserIds.push({ userId, error: err.message });
+          console.error(`✗ ${userId} - Error:`, err.message);
+        }
+      }
 
-      const { successCount: chunkSuccess, failCount: chunkFail, successfulUserIds } =
-        await processUserChunk(guild, chunk, role, dryRun);
-
-      successCount += chunkSuccess;
-      failCount += chunkFail;
-      allSuccessfulUserIds.push(...successfulUserIds);
-
-      if (i + chunkSize < userIds.length) {
-        await new Promise((res) => setTimeout(res, delayMs));
+      // Progress update every 50 users
+      if ((i + 1) % 50 === 0) {
+        const progress = ((i + 1) / userIds.length * 100).toFixed(1);
+        console.log(`Progress: ${i + 1}/${userIds.length} (${progress}%) - Success: ${successCount}, Failed: ${failCount}`);
       }
     }
 
-    // Write successful user IDs to file (only for actual role assignments, not dry runs)
-    if (!dryRun && allSuccessfulUserIds.length > 0) {
-      try {
-        await fs.writeFile("lastrun.txt", allSuccessfulUserIds.join("\n"), "utf-8");
-        console.log(`Logged ${allSuccessfulUserIds.length} successful user IDs to lastrun.txt`);
-      } catch (fileError) {
-        console.error("Failed to write to lastrun.txt:", fileError);
-      }
+    if (logFileHandle) {
+      console.log(`\nLogged ${successCount} successful user IDs to lastrun.txt`);
+    }
+
+    let summary = dryRun
+      ? `Dry run complete: able to fetch ${successCount} users. failed for ${failCount} users`
+      : `Successfully assigned "${role.name}" role to ${successCount} users. failed for ${failCount} users`;
+
+    if (failedUserIds.length > 0 && failedUserIds.length <= 10) {
+      summary += `\n\nFailed users:\n${failedUserIds.map(f => `- ${f.userId}: ${f.error}`).join("\n")}`;
+    } else if (failedUserIds.length > 10) {
+      summary += `\n\nFirst 10 failed users:\n${failedUserIds.slice(0, 10).map(f => `- ${f.userId}: ${f.error}`).join("\n")}\n... and ${failedUserIds.length - 10} more`;
     }
 
     await interaction.followUp({
-      content: dryRun
-        ? `dry run complete: able to fetch ${successCount} users. failed for ${failCount} users`
-        : `successfully assigned "${role.name}" role to ${successCount} users. failed for ${failCount} users`,
+      content: summary,
       ephemeral: true,
     });
   } catch (error) {
